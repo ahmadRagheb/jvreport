@@ -27,6 +27,8 @@ def execute(filters=None):
 
 	res = get_result(filters, account_details)
 	# invoice_list = get_invoices(filters, additional_query_columns)
+
+	# invocies data start here 
 	invoice_list = get_invoices()
 	if not invoice_list:
 		msgprint(_("No record found"))
@@ -69,31 +71,40 @@ def execute(filters=None):
 		]
 		# map income values
 		base_net_total = 0
+		income_accounts_total = []
 		for income_acc in income_accounts:
 			income_amount = flt(invoice_income_map.get(inv.name, {}).get(income_acc))
 			base_net_total += income_amount
-			# row.append(income_amount)
+			#adding income to raw data
+			income_accounts_total.append(income_acc)
+			row.append(income_amount)
 
 		# net total
 		row.append(base_net_total or inv.base_net_total)
 
 		# tax account
 		total_tax = 0
+		total_tax_accounts = []
 		for tax_acc in tax_accounts:
 			if tax_acc not in income_accounts:
 				tax_amount = flt(invoice_tax_map.get(inv.name, {}).get(tax_acc))
 				total_tax += tax_amount
-				# row.append(tax_amount)
+				total_tax_accounts.append(tax_acc)
+				row.append(tax_amount)
 
 		# total tax, grand total, outstanding amount & rounded total
 		row += [total_tax, inv.base_grand_total, inv.base_rounded_total, inv.outstanding_amount]
 
 		data.append(row)
 
+
 	# frappe.throw(str(len(data[0])))
+
+	# frappe.msgprint(str(res))
 
 	for inv in data :
 		row = {}
+		i = 16 
 		row['voucher_no'] = inv[0]
 		row['posting_date'] = inv[1]
 		row['party'] = inv[2]
@@ -111,12 +122,96 @@ def execute(filters=None):
 		row['cost_center'] = inv[14]
 		row['warehouse'] = inv[15]
 		row['company_currency'] = inv[16]
-		row['net_total'] = inv[17]
-		row['total_tax'] = inv[18]
-		row['grand_total'] = inv[19]
-		row['rounded_total'] = inv[20]
-		row['outstanding_amount'] = inv[21]
+
+		if len(income_accounts_total)>0:
+			for count,acc in enumerate(income_accounts_total,17):
+				# frappe.msgprint(str(inv[count]))
+				row[str(acc)] =  inv[count]		
+				i += 1
+		i += 1
+		
+		row['net_total'] = inv[i]
+
+		if len(total_tax_accounts)>0:
+			i+=1
+			for count,acc in enumerate(total_tax_accounts,i):
+				row[acc] =  inv[count]
+				i += 1
+		i+=1
+		for x in range(i, i+3):
+			row['total_tax'] = inv[x]
+			row['grand_total'] = inv[x]
+			row['rounded_total'] = inv[x]
+			row['outstanding_amount'] = inv[x]
 		res.append(row)
+
+
+	# frappe.msgprint(str(total_tax_accounts))
+	if len(income_accounts_total)>0:
+		for count,acc in enumerate(income_accounts_total,17):
+			col ={
+				"label": _(str(acc)),
+				"fieldname": str(acc),
+				"width": 100
+			}
+			columns = columns[:count] + [col] + columns[count:]
+
+	tax_index=0	
+
+	for count, x in enumerate(columns):
+		if x['fieldname']=="net_total":
+			tax_index = count+1
+			# frappe.msgprint(str(tax_index))
+			break 
+	if len(total_tax_accounts)>0:
+		for count,acc in enumerate(total_tax_accounts,tax_index):
+			col ={
+				"label": _(str(acc)),
+				"fieldname": str(acc),
+				"width": 100
+			}
+			columns = columns[:count] + [col] + columns[count:]
+
+	#get end of tax coloumns
+	count_tax = 0 
+	for count, x in enumerate(columns):
+		if x['fieldname']=="total_tax":
+			count_tax = count
+			break 
+
+	#gl tax changes in col
+	voucher_no_list = []
+	voucher_no_dict = []
+	tax_list_for_del = []
+	for count,gl_dict in enumerate(res):
+		if 'account_type' in gl_dict:
+			if gl_dict['account_type'] == 'Tax':
+				voucher_no_list.append(gl_dict['voucher_no'])
+				voucher_no_dict.append({
+					"voucher_no":gl_dict['voucher_no'],
+					"account":gl_dict['account'],
+					"amount":gl_dict['credit']
+					})
+				tax_list_for_del.append(count)
+				col ={
+					"label": _(str(gl_dict['account'])),
+					"fieldname": str(gl_dict['account']),
+					"width": 100
+					}
+				columns = columns[:count_tax] + [col] + columns[count_tax:]
+
+
+				# frappe.msgprint(str(count_tax))
+	for index in tax_list_for_del:
+		del res[index]
+	if len(voucher_no_list)>0:
+		for gl_dict in res:
+			if 'voucher_no' in gl_dict:
+				if gl_dict['voucher_no'] in voucher_no_list:
+					for vnd in voucher_no_dict:
+						if vnd['voucher_no'] == gl_dict['voucher_no']:
+							gl_dict[str(vnd["account"])] = vnd['amount']
+
 	# frappe.throw(str(res))
 	return columns, res
 
@@ -292,15 +387,18 @@ def get_gl_entries(filters):
 
 	gl_entries = frappe.db.sql("""
 		select
-			 gl.voucher_no, gl.posting_date, gl.account, gl.party_type, gl.party,
+			 gl.voucher_no, gl.posting_date, gl.account
+			 ,acc.account_type,gl.party_type, gl.party,
 			sum(gl.debit) as debit, sum(gl.credit) as credit,
 			gl.voucher_type, gl.cost_center, gl.project,
 			gl.against_voucher_type, gl.against_voucher,
 			gl.remarks, gl.against, gl.is_opening {select_fields},
 			c.customer_name,c.customer_group,c.territory,c.tax_id,
 			je.owner
-		from `tabGL Entry` as gl ,`tabJournal Entry` as je, `tabCustomer` as c
+		from `tabGL Entry` as gl ,`tabJournal Entry` as je, 
+		`tabCustomer` as c,`tabAccount` as acc
 		where gl.voucher_type="Journal Entry" and je.sales_register="1"
+		and gl.account = acc.name
 		and gl.voucher_no = je.name and gl.company=%(company)s {conditions}
 		{group_by_condition}
 		order by gl.posting_date, gl.account"""\
@@ -346,7 +444,7 @@ def get_data_with_opening_closing(filters, account_details, gl_entries):
 	totals, entries = get_accountwise_gle(filters, gl_entries, gle_map)
 
 	# Opening for filtered account
-	data.append(totals.opening)
+	# data.append(totals.opening)
 
 	if filters.get("group_by_account"):
 		for acc, acc_dict in gle_map.items():
@@ -368,10 +466,10 @@ def get_data_with_opening_closing(filters, account_details, gl_entries):
 		data += entries
 
 	# totals
-	data.append(totals.total)
+	# data.append(totals.total)
 
 	# closing
-	data.append(totals.closing)
+	# data.append(totals.closing)
 
 	return data
 
